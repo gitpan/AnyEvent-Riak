@@ -1,27 +1,96 @@
-This is Perl module AnyEvent::Riak.
+NAME
+    AnyEvent::Riak - non-blocking Riak client
 
-INSTALLATION
+VERSION
+    version 0.02
 
-AnyEvent::Riak installation is straightforward. If your CPAN shell is set up,
-you should just be able to do
+SYNOPSIS
+        use AnyEvent::Riak;
 
-    % cpan AnyEvent::Riak
+        my $riak = AnyEvent::Riak->new(
+            host => 'http://127.0.0.1:8098',
+            path => 'riak',
+        );
 
-Download it, unpack it, then build it as per the usual:
+    This version is not compatible with the previous version (0.01) of this
+    module and with Riak < 0.91.
 
-    % perl Makefile.PL
-    % make && make test
+    For a complete description of the Riak REST API, please refer to
+    <https://wiki.basho.com/display/RIAK/REST+API>.
 
-Then install it:
+DESCRIPTION
+    AnyEvent::Riak is a non-blocking riak client using "AnyEvent". This
+    client allows you to connect to a Riak instance, create, modify and
+    delete Riak objects.
 
-    % make install
+  METHODS
+    is_alive ([$cv, $cb])
+        Check if the Riak server is alive. If the ping is successful, 1 is
+        returned, else 0.
 
-DOCUMENTATION
+        Options can be:
 
-AnyEvent::Riak documentation is available as in POD. So you can do:
+        headers
+            A list of valid HTTP headers that will be send with the query
 
-    % perldoc AnyEvent::Riak
+    list_bucket ($bucket_name, [$options, $cv, $cb])
+        Reads the bucket properties and/or keys.
 
-to read the documentation online with your favorite pager.
+            $riak->list_bucket(
+                'mybucket',
+                {props => 'true', keys => 'false'},
+                sub {
+                    my $res = shift;
+                    ...
+                }
+              );
 
-franck cuny
+    set_bucket ($bucket_name, $schema, [%options, $cv, $cb])
+        Sets bucket properties like n_val and allow_mult.
+
+            $riak->set_bucket(
+                'mybucket',
+                {n_val => 5},
+                sub {
+                    my $res = shift;
+                    ...;
+                }
+            );
+
+    fetch ($bucket_name, $key, [$options, $cv, $cb])
+        Reads an object from a bucket.
+
+            $riak->fetch(
+                'mybucket', 'mykey',
+                {params => {r = 2}, headers => {'If-Modified-Since' => $value}},
+                sub {
+                    my $res = shift;
+                }
+            );
+
+    store ($bucket_name, $key, $object, [$options, $cv, $cb])
+        Stores a new object in a bucket.
+
+            $riak->store(
+                'mybucket', $object,
+                {key => 'mykey', headers => {''}, params => {w => 2}},
+                sub {
+                    my $res = shift;
+                    ...
+                }
+            );
+
+    delete ($bucket, $key, [$options, $cv, $cb])
+        Deletes an object from a bucket.
+
+            $riak->delete('mybucket', 'mykey', sub { my $res = shift;... });
+
+AUTHOR
+      franck cuny <franck@lumberjaph.net>
+
+COPYRIGHT AND LICENSE
+    This software is copyright (c) 2010 by linkfluence.
+
+    This is free software; you can redistribute it and/or modify it under
+    the same terms as the Perl 5 programming language system itself.
+

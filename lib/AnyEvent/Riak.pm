@@ -1,249 +1,328 @@
 package AnyEvent::Riak;
 
-use strict;
-use Carp;
-use URI;
-use JSON::XS;
+# ABSTRACT: non-blocking Riak client
+
+use JSON;
 use AnyEvent;
 use AnyEvent::HTTP;
+use Moose;
 
-our $VERSION = '0.01';
+with qw/AnyEvent::Riak::Role::HTTPUtils AnyEvent::Riak::Role::CVCB/;
 
-sub new {
-    my ( $class, %args ) = @_;
+our $VERSION = '0.02';
 
-    my $host = delete $args{host} || 'http://127.0.0.1:8098';
-    my $path = delete $args{path} || 'jiak';
+has host => (is => 'rw', isa => 'Str', default => 'http://127.0.0.1:8098');
+has path        => (is => 'rw', isa => 'Str', default => 'riak');
+has mapred_path => (is => 'rw', isa => 'Str', default => 'mapred');
+has r           => (is => 'rw', isa => 'Int', default => 2);
+has w           => (is => 'rw', isa => 'Int', default => 2);
+has dw          => (is => 'rw', isa => 'Int', default => 2);
 
-    bless {
-        host => $host,
-        path => $path,
-        %args,
-    }, $class;
-}
+sub is_alive {
+    my $self = shift;
 
-sub set_bucket {
-    my ( $self, $bucket, $schema ) = @_;
+    my ($cv, $cb) = $self->_cvcb(\@_);
+    my $options = shift;
 
-    carp "your schema is missing allowed_fields"
-        if ( !exists $schema->{allowed_fields} );
-
-    if ( !exists $schema->{required_fields} ) {
-        $schema->{required_fields} = [];
-    }
-    if ( !exists $schema->{read_mask} ) {
-        $schema->{read_mask} = $schema->{allowed_fields};
-    }
-    if ( !exists $schema->{write_mask} ) {
-        $schema->{write_mask} = $schema->{read_mask};
-    }
-
-    $self->_request(
-        'PUT', $self->_build_uri( [$bucket] ),
-        '204', encode_json { schema => $schema }
-    );
-}
-
-sub list_bucket {
-    my ( $self, $bucket ) = @_;
-    return $self->_request( 'GET', $self->_build_uri( [$bucket] ), '200' );
-}
-
-sub fetch {
-    my ( $self, $bucket, $key, $r ) = @_;
-    $r = $self->{r} || 2 if !$r;
-    return $self->_request( 'GET',
-        $self->_build_uri( [ $bucket, $key ], { r => $r } ), '200' );
-}
-
-sub store {
-    my ( $self, $object, $w, $dw, ) = @_;
-
-    $w  = $self->{w}  || 2 if !$w;
-    $dw = $self->{dw} || 2 if !$dw;
-
-    my $bucket = $object->{bucket};
-    my $key    = $object->{key};
-    $object->{links} = [] if !exists $object->{links};
-
-    return $self->_request(
-        'PUT',
-        $self->_build_uri(
-            [ $bucket, $key ],
-            {
-                w          => $w,
-                dw         => $dw,
-                returnbody => 'true'
+    http_request(
+        GET     => $self->_build_uri([qw/ping/]),
+        headers => $self->_build_headers(),
+        sub {
+            my ($body, $headers) = @_;
+            if ($headers->{Status} == 200) {
+                $cv->send($cb->(1));
             }
-        ),
-        '200',
-        encode_json $object);
-}
-
-sub delete {
-    my ( $self, $bucket, $key, $rw ) = @_;
-
-    $rw = $self->{rw} || 2 if !$rw;
-    return $self->_request( 'DELETE',
-        $self->_build_uri( [ $bucket, $key ], { dw => $rw } ), 204 );
-}
-
-sub walk {
-    my ( $self, $bucket, $key, $spec ) = @_;
-    my $path = $self->_build_uri( [ $bucket, $key ] );
-    $path .= $self->_build_spec($spec);
-    return $self->_request( 'GET', $path, 200 );
-}
-
-sub _build_spec {
-    my ( $self, $spec ) = @_;
-    my $acc = '/';
-    foreach my $item (@$spec) {
-        $acc
-            .= ( $item->{bucket} || '_' ) . ','
-            . ( $item->{tag} || '_' ) . ','
-            . ( $item->{acc} || '_' ) . '/';
-    }
-    return $acc;
-}
-
-sub _build_uri {
-    my ( $self, $path, $query ) = @_;
-    my $uri = URI->new( $self->{host} );
-    $uri->path( $self->{path} . "/" . join( "/", @$path ) );
-    $uri->query_form(%$query) if $query;
-    return $uri->as_string;
-}
-
-sub _request {
-    my ( $self, $method, $uri, $expected, $body ) = @_;
-    my $cv = AnyEvent->condvar;
-    my $cb = sub {
-        my ( $body, $headers ) = @_;
-        if ( $headers->{Status} == $expected ) {
-            $body
-                ? return $cv->send( decode_json($body) )
-                : return $cv->send(1);
+            else {
+                $cv->send($cb->(0));
+            }
         }
-        else {
-            return $cv->croak(
-                encode_json( [ $headers->{Status}, $headers->{Reason} ] ) );
-        }
-    };
-    if ($body) {
-        http_request(
-            $method => $uri,
-            headers => { 'Content-Type' => 'application/json', },
-            body    => $body,
-            $cb
-        );
-    }
-    else {
-        http_request(
-            $method => $uri,
-            headers => { 'Content-Type' => 'application/json', },
-            $cb
-        );
-    }
+    );
     $cv;
 }
 
+sub list_bucket {
+    my $self = shift;
+    my $bucket_name = shift;
+
+    my ($cv, $cb) = $self->_cvcb(\@_);
+    my $options = shift;
+
+    my $params = {
+        props => delete $options->{props} || 'true',
+        keys  => delete $options->{keys}  || 'true',
+    };
+
+    http_request(
+        GET     => $self->_build_uri([$self->path, $bucket_name], $params),
+        headers => $self->_build_headers(),
+        sub {
+            my ($body, $headers) = @_;
+            if ($body && $headers->{Status} == 200) {
+                my $res = JSON::decode_json($body);
+                $cv->send($cb->($res));
+            }
+            else {
+                $cv->send($cb->(undef));
+            }
+        }
+    );
+    $cv;
+}
+
+sub set_bucket {
+    my $self        = shift;
+    my $bucket_name = shift;
+    my $schema      = shift;
+
+    my ($cv, $cb) = $self->_cvcb(\@_);
+
+    http_request(
+        PUT     => $self->_build_uri([$self->path, $bucket_name]),
+        headers => $self->_build_headers(),
+        body => JSON::encode_json({props => $schema}),
+        sub {
+            my ($body, $headers) = @_;
+            if ($headers->{Status} == 204) {
+                $cv->send($cb->(1));
+            }
+            else {
+                $cv->send($cb->(0));
+            }
+        }
+    );
+    $cv;
+}
+
+sub fetch {
+    my $self        = shift;
+    my $bucket_name = shift;
+    my $key         = shift;
+
+    my ($cv, $cb) = $self->_cvcb(\@_);
+    my $options = shift;
+
+    my $params = {r => $options->{params}->{r} || $self->r,};
+
+    if ($options->{vtag}) {
+        $params->{vtag} = delete $options->{vtag};
+    }
+
+    my $headers = {};
+    foreach (qw/If-None-Match If-Modified-Since Accept/) {
+        $headers->{$_} = delete $options->{headers}->{$_}
+          if (exists $options->{headers}->{$_});
+    }
+
+    http_request(
+        GET =>
+          $self->_build_uri([$self->path, $bucket_name, $key], $params),
+        headers => $self->_build_headers($headers),
+        sub {
+            my ($body, $headers) = @_;
+            # XXX 300 && 304
+            if ($body && $headers->{Status} == 200) {
+                $cv->send($cb->(JSON::decode_json($body)));
+            }
+            else {
+                $cv->send($cb->(0));
+            }
+        }
+    );
+    $cv;
+}
+
+sub store {
+    my $self        = shift;
+    my $bucket_name = shift;
+    my $object      = shift;
+
+    my ($cv, $cb) = $self->_cvcb(\@_);
+    my $options = shift;
+    my $key = '';
+
+    my $params = {
+        w          => $options->{params}->{w}          || $self->w,
+        dw         => $options->{params}->{dw}         || $self->dw,
+        returnbody => $options->{params}->{returnbody} || 'true',
+    };
+
+    if ($options->{key}) {
+        $key = delete $options->{key};
+        $params->{r} = $options->{params}->{r} || $self->r;
+    }
+
+    # XXX headers
+
+    my $json = JSON::encode_json($object);
+
+    http_request(
+        POST => $self->_build_uri([$self->path, $bucket_name, $key,], $params),
+        headers => $self->_build_headers(),
+        body    => $json,
+        sub {
+            my ($body, $headers) = @_;
+            my $result;
+            if ($body && ($headers->{Status} == 201 || $headers->{Status} == 200)) {
+                $result = $body ? JSON::decode_json($body) : 1;
+            }
+            elsif ($headers->{Status} == 204) {
+                $result = 1;
+            }
+            else {
+                $result = 0;
+            }
+            $cv->send($cb->($result, $headers));
+        }
+    );
+    $cv;
+}
+
+sub delete {
+    my $self        = shift;
+    my $bucket_name = shift;
+    my $key         = shift;
+
+    my ($cv, $cb) = $self->_cvcb(@_);
+
+    http_request(
+        DELETE  => $self->_build_uri([$self->path, $bucket_name, $key],),
+        headers => $self->_build_headers(),
+        sub {
+            my ($body, $headers) = @_;
+            if ($headers->{Status} == 204) {
+                $cv->send($cb->(1));
+            }
+            else {
+                $cv->send($cb->(0));
+            }
+        }
+    );
+    $cv;
+}
+
+no Moose;
+
 1;
-__END__
+
+
+
+=pod
 
 =head1 NAME
 
-AnyEvent::Riak - Non-blocking Riak client
+AnyEvent::Riak - non-blocking Riak client
+
+=head1 VERSION
+
+version 0.02
 
 =head1 SYNOPSIS
 
-  use AnyEvent::Riak;
+    use AnyEvent::Riak;
 
-  my $riak = AnyEvent::Riak->new(
-    host => 'http://127.0.0.1:8098',
-    path => 'jiak',
-  );
+    my $riak = AnyEvent::Riak->new(
+        host => 'http://127.0.0.1:8098',
+        path => 'riak',
+    );
 
-  my $buckets    = $riak->list_bucket('bucketname')->recv;
-  my $new_bucket = $riak->set_bucket('foo', {allowed_fields => '*'})->recv;
-  my $store      = $riak->store({bucket => 'foo', key => 'bar', object => {baz => 1},link => []})->recv;
-  my $fetch      = $riak->fetch('foo', 'bar')->recv;
-  my $delete     = $riak->delete('foo', 'bar')->recv;
+This version is not compatible with the previous version (0.01) of this module and with Riak < 0.91.
+
+For a complete description of the Riak REST API, please refer to L<https://wiki.basho.com/display/RIAK/REST+API>.
 
 =head1 DESCRIPTION
 
-AnyEvent::Riak is a non-blocking riak client using anyevent.
+AnyEvent::Riak is a non-blocking riak client using C<AnyEvent>. This client allows you to connect to a Riak instance, create, modify and delete Riak objects.
 
 =head2 METHODS
 
 =over 4
 
-=item B<list_bucket>
+=item B<is_alive> ([$cv, $cb])
 
-Get the schema and key list for 'bucket'
+Check if the Riak server is alive. If the ping is successful, 1 is returned, else 0.
 
-    $riak->list_bucket('bucketname')->recv;
+Options can be:
 
-=item B<set_bucket>
+=over 4
 
-Set the schema for 'bucket'. The schema parameter must be a hash with at least
-an 'allowed_fields' field. Other valid fields are 'requried_fields',
-'read_mask', and 'write_mask'.
+=item B<headers>
 
-    $riak->new_bucket('bucketname', {allowed_fields => '*'})->recv;
+A list of valid HTTP headers that will be send with the query
 
-=item B<fetch>
+=back
 
-Get the object stored in 'bucket' at 'key'.
+=item B<list_bucket> ($bucket_name, [$options, $cv, $cb])
 
-    $riak->fetch('bucketname', 'key')->recv;
+Reads the bucket properties and/or keys.
 
-=item B<store>
+    $riak->list_bucket(
+        'mybucket',
+        {props => 'true', keys => 'false'},
+        sub {
+            my $res = shift;
+            ...
+        }
+      );
 
-Store 'object' in Riak. If the object has not defined its 'key' field, a key
-will be chosen for it by the server.
+=item B<set_bucket> ($bucket_name, $schema, [%options, $cv, $cb])
 
-    $riak->store({
-        bucket => 'bucketname', 
-        key    => 'key', 
-        object => { foo => "bar", baz => 2 },
-        links  => [],
-    })->recv;
+Sets bucket properties like n_val and allow_mult.
 
-=item B<delete>
+    $riak->set_bucket(
+        'mybucket',
+        {n_val => 5},
+        sub {
+            my $res = shift;
+            ...;
+        }
+    );
 
-Delete the data stored in 'bucket' at 'key'.
+=item B<fetch> ($bucket_name, $key, [$options, $cv, $cb])
 
-    $riak->delete('bucketname', 'key')->recv;
+Reads an object from a bucket.
 
-=item B<walk>
+    $riak->fetch(
+        'mybucket', 'mykey',
+        {params => {r = 2}, headers => {'If-Modified-Since' => $value}},
+        sub {
+            my $res = shift;
+        }
+    );
 
-Follow links from the object stored in 'bucket' at 'key' to other objects.
-The 'spec' parameter should be an array of hashes, each hash optinally
-defining 'bucket', 'tag', and 'acc' fields.  If a field is not defined in a
-spec hash, the wildcard '_' will be used instead.
+=item B<store> ($bucket_name, $key, $object, [$options, $cv, $cb])
 
-    ok $res = $jiak->walk( 
-        'bucketname', 
-        'key', 
-        [ { bucket => 'bucketname', key => '_' } ] 
-    )->recv;
+Stores a new object in a bucket.
+
+    $riak->store(
+        'mybucket', $object,
+        {key => 'mykey', headers => {''}, params => {w => 2}},
+        sub {
+            my $res = shift;
+            ...
+        }
+    );
+
+=item B<delete> ($bucket, $key, [$options, $cv, $cb])
+
+Deletes an object from a bucket.
+
+    $riak->delete('mybucket', 'mykey', sub { my $res = shift;... });
 
 =back
 
 =head1 AUTHOR
 
-franck cuny E<lt>franck@lumberjaph.netE<gt>
+  franck cuny <franck@lumberjaph.net>
 
-=head1 SEE ALSO
+=head1 COPYRIGHT AND LICENSE
 
-=head1 LICENSE
+This software is copyright (c) 2010 by linkfluence.
 
-Copyright 2009 by linkfluence.
-
-L<http://linkfluence.net>
-
-This library is free software; you can redistribute it and/or modify
-it under the same terms as Perl itself.
+This is free software; you can redistribute it and/or modify it under
+the same terms as the Perl 5 programming language system itself.
 
 =cut
+
+
+__END__
+
